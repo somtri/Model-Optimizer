@@ -51,10 +51,11 @@ constexpr int kFp8FiniteCount = 127;
 
 #ifdef __CUDACC__
 
-// Filled once from the host by upload_fp8_grid, whose definition lives in lut3.cu
-// because it owns this symbol. A __constant__ defined in a header gives each
-// translation unit its own copy, so a second kernel including this file would read
-// an empty one -- that needs an extern declaration here and a single definition.
+// Filled from the host by upload_fp8_grid, which lives in lut3.cu. This is a
+// definition rather than an extern declaration, so every CUDA translation unit that
+// includes this header gets its own copy and upload_fp8_grid fills only lut3.cu's.
+// A second kernel .cu must therefore upload into its own copy; sharing one instead
+// would mean an extern here, a single definition, and -rdc=true to link across.
 __constant__ float c_fp8_grid[kFp8GridSize];
 
 __device__ inline void insertionSort_inplace(float *a, int n) {
@@ -149,7 +150,8 @@ __device__ inline void prefetch_and_unpack(const float4 *src, float *dst) {
 #endif // __CUDACC__
 
 // Defined in lut3.cu, which owns c_fp8_grid. Declared outside the guard so the host
-// binding can call it.
-void upload_fp8_grid(const float *host_grid);
+// binding can call it. Takes the stream the kernel will run on: the copy is ordered
+// on that stream so the launch cannot overtake it.
+cudaError_t upload_fp8_grid(const float *host_grid, cudaStream_t stream);
 
 } // namespace modelopt::lut

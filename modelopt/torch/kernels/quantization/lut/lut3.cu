@@ -400,6 +400,15 @@ void launchKernel(const float4 *operand, float4 *out, int dim1, int dim2, __nv_f
 
 } // namespace opportunistic_kmeans_3b_8x64_bs32_k
 
-void modelopt::lut::upload_fp8_grid(const float *host_grid) {
-  cudaMemcpyToSymbol(c_fp8_grid, host_grid, FP8_SIZE * sizeof(float));
+cudaError_t modelopt::lut::upload_fp8_grid(const float *host_grid, cudaStream_t stream) {
+  // Async on the compute stream, so the kernel launched after it is ordered behind
+  // the copy. The synchronous cudaMemcpyToSymbol would enqueue the transfer on the
+  // legacy stream instead, which a non-blocking stream is free to run ahead of. The
+  // synchronize below is what makes the pageable host buffer safe to reuse.
+  cudaError_t status = cudaMemcpyToSymbolAsync(c_fp8_grid, host_grid, FP8_SIZE * sizeof(float), 0,
+                                               cudaMemcpyHostToDevice, stream);
+  if (status != cudaSuccess) {
+    return status;
+  }
+  return cudaStreamSynchronize(stream);
 }

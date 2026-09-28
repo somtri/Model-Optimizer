@@ -83,6 +83,12 @@ def test_decode_round_trip(lut_ext):
 # Golden values. The quantized weights below are what the reference kernel produces
 # for these inputs, so they are what holds us to it. The codebook and scale are our
 # own -- the reference does not return them -- recorded so they cannot drift silently.
+#
+# The kernel fits centroids with float atomicAdd, so in general the result depends on
+# the order the atomics land in, which is not defined across architectures. These two
+# inputs are chosen so that cannot matter: every value is a multiple of 2^-3 or 2^-8
+# with magnitude under 4, so each 32-weight block sums exactly in float32 in any
+# order. That is what makes exact equality safe to assert on a different GPU.
 
 
 def ramp_input():
@@ -253,6 +259,14 @@ def _misaligned_view():
     return base[1:].view(16, 64)
 
 
+def _weight_with_a_nan():
+    """One non-finite value makes every squared-error comparison in the search false,
+    so its whole 8x64 tile comes back as uninitialized memory rather than as NaN."""
+    w = torch.randn(16, 64, dtype=torch.bfloat16, device="cuda")
+    w[0, 5] = float("nan")
+    return w
+
+
 @pytest.mark.parametrize(
     ("make_bad_input", "message"),
     [
@@ -292,6 +306,7 @@ def _misaligned_view():
             id="zero-columns",
         ),
         pytest.param(_misaligned_view, "16-byte aligned", id="misaligned"),
+        pytest.param(_weight_with_a_nan, "finite", id="not-finite"),
     ],
 )
 def test_rejects_unsupported_input(lut_ext, make_bad_input, message):

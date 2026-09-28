@@ -68,6 +68,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> lut3_quantize(at::Tensor weight) 
               ", got ", rows);
   TORCH_CHECK(cols % kLut3TileCols == 0, "lut3 requires columns divisible by ", kLut3TileCols,
               ", got ", cols);
+  // A single non-finite value poisons every squared-error comparison in the search,
+  // which is a strict <, so the block never selects a scale and the whole 8x64 tile
+  // falls out as arbitrary bits. One reduction and sync per weight, against a search
+  // that runs 200 k-means iterations.
+  TORCH_CHECK(weight.isfinite().all().item<bool>(), "lut3 requires a finite weight");
   // Zero satisfies both modulos above but gives the launcher an empty grid, which
   // the driver rejects with a bare "invalid argument".
   TORCH_CHECK(rows > 0 && cols > 0, "lut3 requires a non-empty weight, got ", rows, "x", cols);
@@ -92,7 +97,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> lut3_quantize(at::Tensor weight) 
     const int device = weight.get_device();
     const std::lock_guard<std::mutex> lock(upload_mutex);
     if (!uploaded[device]) {
-      upload_fp8_grid(fp8_grid().data());
+      // Only recorded once the copy has actually landed, so a transient failure is
+      // not cached for the life of the process.
+      C10_CUDA_CHECK(upload_fp8_grid(fp8_grid().data(), at::cuda::getCurrentCUDAStream()));
       uploaded[device] = true;
     }
   }
