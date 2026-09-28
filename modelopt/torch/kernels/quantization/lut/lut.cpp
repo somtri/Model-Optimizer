@@ -15,12 +15,14 @@
  * limitations under the License.
  */
 
+#include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_fp8.h>
 #include <torch/extension.h>
 
 #include "common.cuh"
 
+#include <mutex>
 #include <vector>
 
 namespace opportunistic_kmeans_3b_8x64_bs32_k {
@@ -66,12 +68,25 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> lut3_quantize(at::Tensor weight) 
   TORCH_CHECK(cols % kLut3TileCols == 0, "lut3 requires columns divisible by ", kLut3TileCols,
               ", got ", cols);
 
-  // Uploaded on the first call. A function-local static is initialized exactly
-  // once even if two threads arrive together, which a plain flag would not be.
-  [[maybe_unused]] static const bool grid_uploaded = [] {
-    upload_fp8_grid(fp8_grid().data());
-    return true;
-  }();
+  // The kernel launches on whichever device is current, while the output tensors
+  // follow the input's device. Without this guard a weight on a non-current GPU
+  // quantizes to garbage rather than raising.
+  const at::cuda::OptionalCUDAGuard guard(weight.device());
+
+  // c_fp8_grid is __constant__, so every device holds its own copy and the upload
+  // has to happen once per device rather than once per process. The mutex also
+  // makes concurrent first calls safe; it is taken once per tensor, which is
+  // nothing next to the search kernel.
+  {
+    static std::mutex upload_mutex;
+    static std::vector<bool> uploaded(at::cuda::device_count(), false);
+    const int device = weight.get_device();
+    const std::lock_guard<std::mutex> lock(upload_mutex);
+    if (!uploaded[device]) {
+      upload_fp8_grid(fp8_grid().data());
+      uploaded[device] = true;
+    }
+  }
 
   auto quantized = at::empty_like(weight);
   auto codebook = at::empty({rows / kLut3TileRows, cols / kLut3TileCols, kLut3CodebookSize},

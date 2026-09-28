@@ -244,6 +244,22 @@ def test_deterministic(lut_ext):
         assert torch.equal(first, again)
 
 
+def test_weight_on_a_non_current_device(lut_ext):
+    """The kernel launches on whichever device is current and its E4M3 table lives in
+    per-device constant memory, so a weight on another GPU has to be handled
+    explicitly. Getting this wrong returns an all-zero codebook rather than raising."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs two GPUs")
+    torch.manual_seed(0)
+    base = torch.randn(64, 256, dtype=torch.bfloat16)
+
+    torch.cuda.set_device(0)
+    expected, _, _ = lut_ext.lut3_quantize(base.cuda(0))
+    on_other_device, _, _ = lut_ext.lut3_quantize(base.cuda(1))
+
+    assert torch.equal(on_other_device.cpu(), expected.cpu())
+
+
 def test_leaves_the_input_weight_unchanged(lut_ext):
     """The kernel writes to its own output buffer, so callers keep their weight."""
     w = torch.randn(64, 256, dtype=torch.bfloat16, device="cuda")
