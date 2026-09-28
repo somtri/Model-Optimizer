@@ -38,6 +38,10 @@ def test_cuda_ext_mx():
     assert ext.get_cuda_ext_mx() is not None
 
 
+def test_cuda_ext_lut():
+    assert ext.get_cuda_ext_lut() is not None
+
+
 def test_cuda_ext_ggml():
     assert ext.get_cuda_ext_ggml() is not None
 
