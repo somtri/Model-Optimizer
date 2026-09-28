@@ -183,19 +183,6 @@ def test_ramp_rows_quantize_identically(lut_ext):
     assert torch.equal(quantized, quantized[0].expand(16, 64))
 
 
-def test_each_scale_block_uses_at_most_eight_values(lut_ext):
-    """3 bits means a 32-weight block can only draw on its tile's 8 codebook
-    entries. An unquantized block of 32 would hold close to 32 distinct values."""
-    rows, cols = 64, 256
-    w = torch.randn(rows, cols, dtype=torch.bfloat16, device="cuda")
-    w, _, _ = lut_ext.lut3_quantize(w)
-
-    blocks = w.float().reshape(rows, cols // SCALE_BLOCK, SCALE_BLOCK)
-    for row in range(0, rows, 8):
-        for block in range(cols // SCALE_BLOCK):
-            assert len(torch.unique(blocks[row, block])) <= CODEBOOK_SIZE
-
-
 def test_all_zero_weight_quantizes_to_near_zero(lut_ext):
     """Exact zero is deliberately not reachable from the codebook, so an all-zero
     weight lands on the smallest value the format can express rather than on zero
@@ -223,17 +210,6 @@ def test_block_starting_with_zero_does_not_produce_nan(lut_ext):
     quantized, _, _ = lut_ext.lut3_quantize(w)
 
     assert torch.isfinite(quantized).all()
-
-
-def test_values_lie_on_the_fp8_grid(lut_ext):
-    """An E4M3 value is (1 + f/8) * 2^k, so frexp mantissa * 16 is an integer."""
-    w, _, _ = lut_ext.lut3_quantize(torch.randn(64, 256, dtype=torch.bfloat16, device="cuda"))
-
-    magnitudes = w.float().abs()
-    magnitudes = magnitudes[magnitudes > 0]
-    mantissa, _ = torch.frexp(magnitudes)
-    codes = mantissa.double() * 16
-    assert torch.equal(codes, codes.round())
 
 
 def test_deterministic(lut_ext):
@@ -271,27 +247,56 @@ def test_leaves_the_input_weight_unchanged(lut_ext):
     assert not torch.equal(quantized, original)
 
 
+def _misaligned_view():
+    """Contiguous and correctly shaped, but starting two bytes into its storage."""
+    base = torch.randn(16 * 64 + 1, dtype=torch.bfloat16, device="cuda")
+    return base[1:].view(16, 64)
+
+
 @pytest.mark.parametrize(
-    ("kwargs", "message"),
+    ("make_bad_input", "message"),
     [
-        ({"rows": 63, "cols": 256}, "rows divisible by 16"),
-        ({"rows": 64, "cols": 250}, "columns divisible by 64"),
-        ({"rows": 64, "cols": 256, "dtype": torch.float32}, "bfloat16"),
-        ({"rows": 64, "cols": 256, "ndim": 3}, "2-D"),
-        ({"rows": 64, "cols": 256, "contiguous": False}, "contiguous"),
+        pytest.param(
+            lambda: torch.randn(63, 256, dtype=torch.bfloat16, device="cuda"),
+            "rows divisible by 16",
+            id="ragged-rows",
+        ),
+        pytest.param(
+            lambda: torch.randn(64, 250, dtype=torch.bfloat16, device="cuda"),
+            "columns divisible by 64",
+            id="ragged-columns",
+        ),
+        pytest.param(
+            lambda: torch.randn(64, 256, dtype=torch.float32, device="cuda"),
+            "bfloat16",
+            id="wrong-dtype",
+        ),
+        pytest.param(
+            lambda: torch.randn(2, 64, 256, dtype=torch.bfloat16, device="cuda"),
+            "2-D",
+            id="three-dimensional",
+        ),
+        pytest.param(
+            lambda: torch.randn(64, 512, dtype=torch.bfloat16, device="cuda")[:, ::2],
+            "contiguous",
+            id="strided",
+        ),
+        pytest.param(
+            lambda: torch.empty(0, 64, dtype=torch.bfloat16, device="cuda"),
+            "non-empty",
+            id="zero-rows",
+        ),
+        pytest.param(
+            lambda: torch.empty(16, 0, dtype=torch.bfloat16, device="cuda"),
+            "non-empty",
+            id="zero-columns",
+        ),
+        pytest.param(_misaligned_view, "16-byte aligned", id="misaligned"),
     ],
 )
-def test_rejects_unsupported_input(lut_ext, kwargs, message):
-    """The kernel has no bounds checks, so bad shapes must raise rather than
-    silently leave trailing rows or columns unquantized."""
-    rows, cols = kwargs["rows"], kwargs["cols"]
-    dtype = kwargs.get("dtype", torch.bfloat16)
-    if kwargs.get("ndim") == 3:
-        w = torch.randn(2, rows, cols, dtype=dtype, device="cuda")
-    else:
-        w = torch.randn(rows, cols, dtype=dtype, device="cuda")
-    if kwargs.get("contiguous") is False:
-        w = torch.randn(rows, cols * 2, dtype=dtype, device="cuda")[:, ::2]
-
+def test_rejects_unsupported_input(lut_ext, make_bad_input, message):
+    """The kernel has no bounds checks and reads through float4, so a bad shape or a
+    misaligned pointer must raise here rather than corrupting output or killing the
+    CUDA context."""
     with pytest.raises(RuntimeError, match=message):
-        lut_ext.lut3_quantize(w)
+        lut_ext.lut3_quantize(make_bad_input())

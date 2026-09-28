@@ -22,6 +22,7 @@
 
 #include "common.cuh"
 
+#include <cstdint>
 #include <mutex>
 #include <vector>
 
@@ -67,6 +68,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> lut3_quantize(at::Tensor weight) 
               ", got ", rows);
   TORCH_CHECK(cols % kLut3TileCols == 0, "lut3 requires columns divisible by ", kLut3TileCols,
               ", got ", cols);
+  // Zero satisfies both modulos above but gives the launcher an empty grid, which
+  // the driver rejects with a bare "invalid argument".
+  TORCH_CHECK(rows > 0 && cols > 0, "lut3 requires a non-empty weight, got ", rows, "x", cols);
+  // The kernel reads through float4, so the first element must be 16-byte aligned.
+  // A contiguous tensor can still fail this: a view such as base[1:] starts two
+  // bytes into its storage, and the launch then dies with a misaligned address.
+  TORCH_CHECK(reinterpret_cast<uintptr_t>(weight.data_ptr()) % 16 == 0,
+              "lut3 requires 16-byte aligned storage; clone a sliced view first");
 
   // The kernel launches on whichever device is current, while the output tensors
   // follow the input's device. Without this guard a weight on a non-current GPU
